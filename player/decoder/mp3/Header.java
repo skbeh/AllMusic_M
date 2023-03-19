@@ -220,9 +220,12 @@ public final class Header {
                 h_intensity_stereo_bound = h_number_of_subbands;
             // calculate framesize and nSlots
             calculate_framesize();
+            if (framesize == -1) {
+                throw stream.newBitstreamException(Bitstream.INVALIDFRAME);
+            }
             // read framedata:
             int framesizeloaded = stream.read_frame_data(framesize);
-            if ((framesize >= 0) && (framesizeloaded != framesize)) {
+            if (framesizeloaded != framesize) {
                 // Data loaded does not match to expected framesize,
                 // it might be an ID3v1 TAG. (Fix 11/17/04).
                 throw stream.newBitstreamException(Bitstream.INVALIDFRAME);
@@ -443,7 +446,7 @@ public final class Header {
                 nSlots = 0;
             }
         }
-        framesize -= 4;             // subtract header size
+        framesize = Math.max(framesize - 4, -1);           // subtract header size
     }
 
     /**

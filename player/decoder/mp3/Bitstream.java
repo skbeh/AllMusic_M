@@ -41,6 +41,8 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PushbackInputStream;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 
 /**
@@ -85,7 +87,7 @@ public final class Bitstream implements BitstreamErrors {
      */
     private final byte[] frame_bytes = new byte[BUFFER_INT_SIZE * 4];
     private final Crc16[] crc = new Crc16[1];
-    private PushbackInputStream source;
+    private final PushbackInputStream source;
     //private int 			current_frame_number;
     //private int				last_frame_number;
     public long local = 0;
@@ -113,14 +115,16 @@ public final class Bitstream implements BitstreamErrors {
     private byte[] rawid3v2 = null;
     private boolean firstframe;
 
+    private ByteBuffer id3v2Buffer;
+
     /**
      * Construct a IBitstream that reads data from a
      * given InputStream.
      */
     public Bitstream(APlayer player) {
-        loadID3v2(player);
-        firstframe = true;
         source = new PushbackInputStream(player, BUFFER_INT_SIZE * 4);
+        loadID3v2();
+        firstframe = true;
 
         closeFrame();
     }
@@ -132,25 +136,23 @@ public final class Bitstream implements BitstreamErrors {
     /**
      * Load ID3v2 frames.
      *
-     * @param in MP3 InputStream.
      * @author JavaZOOM
      */
-    private void loadID3v2(InputStream in) {
+    private void loadID3v2() {
         int size = -1;
         try {
             // Read ID3v2 header (10 bytes).
-            in.mark(10);
             local += 10;
-            size = readID3v2Header(in);
-            /*
-              Audio header position in stream.
-             */
-            int header_pos = size;
+            size = readID3v2Header(source);
         } catch (IOException ignored) {
         } finally {
             try {
                 // Unread ID3v2 header (10 bytes).
-                in.reset();
+                id3v2Buffer.flip();
+                byte[] buff = new byte[id3v2Buffer.remaining()];
+                id3v2Buffer.get(buff);
+                id3v2Buffer = null;
+                source.unread(buff);
             } catch (IOException ignored) {
             }
         }
@@ -158,7 +160,7 @@ public final class Bitstream implements BitstreamErrors {
         try {
             if (size > 0) {
                 rawid3v2 = new byte[size];
-                in.read(rawid3v2, 0, rawid3v2.length);
+                source.readNBytes(rawid3v2, 0, rawid3v2.length);
                 local += rawid3v2.length;
             }
         } catch (IOException ignored) {
@@ -174,14 +176,15 @@ public final class Bitstream implements BitstreamErrors {
      * @author JavaZOOM
      */
     private int readID3v2Header(InputStream in) throws IOException {
-        byte[] id3header = new byte[4];
         int size = -10;
-        in.read(id3header, 0, 3);
+        id3v2Buffer = ByteBuffer.allocate(10);
+        id3v2Buffer.put(in.readNBytes(3));
+        id3v2Buffer.position(0);
         // Look for ID3v2
-        if ((id3header[0] == 'I') && (id3header[1] == 'D') && (id3header[2] == '3')) {
-            in.read(id3header, 0, 3);
-            in.read(id3header, 0, 4);
-            size = (id3header[0] << 21) + (id3header[1] << 14) + (id3header[2] << 7) + (id3header[3]);
+        if (id3v2Buffer.get() == 'I' && id3v2Buffer.get() == 'D' && id3v2Buffer.get() == '3') {
+            id3v2Buffer.put(in.readNBytes(7));
+            id3v2Buffer.position(id3v2Buffer.position() - 4);
+            size = (id3v2Buffer.get() << 21) + (id3v2Buffer.get() << 14) + (id3v2Buffer.get() << 7) + (id3v2Buffer.get());
         }
         return (size + 10);
     }
@@ -274,7 +277,7 @@ public final class Bitstream implements BitstreamErrors {
     /**
      * Unreads the bytes read from the frame.
      *
-     * @throws Exception
+     * @throws BitstreamException
      */
     // REVIEW: add new error codes for this.
     public void unreadFrame() throws BitstreamException {
@@ -311,24 +314,20 @@ public final class Bitstream implements BitstreamErrors {
         } catch (IOException ignored) {
         }
 
-        boolean sync = false;
-        switch (read) {
-            case 0:
-                sync = true;
-                break;
-            case 4:
-                sync = isSyncMark(headerstring, syncmode, syncword);
-                break;
-        }
+        boolean sync = switch (read) {
+            case 0 -> true;
+            case 4 -> isSyncMark(headerstring, syncmode, syncword);
+            default -> false;
+        };
 
         return sync;
     }
 
-    protected BitstreamException newBitstreamException(int errorcode) {
+    BitstreamException newBitstreamException(int errorcode) {
         return new BitstreamException(errorcode, null);
     }
 
-    protected BitstreamException newBitstreamException(int errorcode, Throwable throwable) {
+    private BitstreamException newBitstreamException(int errorcode, Throwable throwable) {
         return new BitstreamException(errorcode, throwable);
     }
 
@@ -358,8 +357,7 @@ public final class Bitstream implements BitstreamErrors {
             headerstring |= (syncbuf[3] & 0x000000FF);
 
             sync = isSyncMark(headerstring, syncmode, syncword);
-        }
-        while (!sync);
+        } while (!sync);
 
         return headerstring;
     }
@@ -477,45 +475,31 @@ public final class Bitstream implements BitstreamErrors {
      * @param offs The index in the array where the first byte
      *             read should be stored.
      * @param len  the number of bytes to read.
-     * @throws BitstreamException is thrown if the specified
-     *                            number of bytes could not be read from the stream.
+     * @throws IOException is thrown if the specified
+     *                     number of bytes could not be read from the stream.
      */
-    private int readFully(byte[] b, int offs, int len)
-            throws Exception {
-        int nRead = 0;
-        while (len > 0) {
-            int bytesread = source.read(b, offs, len);
-            local += bytesread;
-            if (bytesread == -1) {
-                while (len-- > 0) {
-                    b[offs++] = 0;
-                }
-                break;
-            }
-            nRead = nRead + bytesread;
-            offs += bytesread;
-            len -= bytesread;
+    private int readFully(byte[] b, int offs, int len) throws IOException {
+        assert offs >= 0;
+        len = Math.min(len, b.length - offs);
+        assert len > 0;
+        int bytesread = source.readNBytes(b, offs, len);
+        local += bytesread;
+        if (bytesread < len) {
+            Arrays.fill(b, bytesread, len - 1, (byte) 0);
         }
-        return nRead;
+        return bytesread;
     }
 
     /**
      * Simlar to readFully, but doesn't throw exception when
      * EOF is reached.
      */
-    private int readBytes(byte[] b, int offs, int len)
-            throws Exception {
-        int totalBytesRead = 0;
-        while (len > 0) {
-            int bytesread = source.read(b, offs, len);
-            local += bytesread;
-            if (bytesread == -1) {
-                break;
-            }
-            totalBytesRead += bytesread;
-            offs += bytesread;
-            len -= bytesread;
-        }
-        return totalBytesRead;
+    private int readBytes(byte[] b, int offs, int len) throws IOException {
+        assert offs >= 0;
+        len = Math.min(len, b.length - offs);
+        assert len > 0;
+        int bytesread = source.readNBytes(b, offs, len);
+        local += bytesread;
+        return bytesread;
     }
 }
